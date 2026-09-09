@@ -273,7 +273,13 @@ export default function DashboardLayout({ children, onReport }: { children: Reac
       <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-white/90 shadow-sm shadow-slate-900/[0.03] backdrop-blur-xl">
         <div className="page-shell flex h-[72px] items-center justify-between gap-4">
           <Link to={user?.role === 'admin' ? '/admin' : user?.role === 'ngo' ? '/ngo' : '/user'} className="flex items-center gap-3">
-            <span className="grid h-10 w-10 place-items-center rounded-2xl bg-forest text-white shadow-lg shadow-forest/20"><Recycle size={23} strokeWidth={2.4} /></span>
+           <span className="grid h-10 w-10 place-items-center rounded-2xl bg-forest shadow-lg shadow-forest/20 overflow-hidden">
+  <img
+    src="/geoclean-icon.png"
+    alt="GeoClean"
+    className="h-8 w-8 object-contain"
+  />
+</span>
             <span className="hidden sm:block">
               <span className="block text-[17px] font-extrabold leading-none tracking-tight text-ink">Geo<span className="text-forest">Clean</span></span>
               <span className="mt-1 block text-[8px] font-semibold uppercase tracking-[0.2em] text-slate-500">Clean City. Green Future.</span>
