@@ -59,9 +59,9 @@ const DOMESTIC_INDOOR_PATTERNS = [
   'rug', 'mat', 'doormat', 'curtain', 'window shade', 'refrigerator',
   'microwave', 'toaster', 'oven', 'stove', 'kitchen counter', 'sink',
   'bathtub', 'shower curtain', 'armchair', 'cushion', 'home theater',
-  'entertainment center', 'lampshade', 'pole', 'nail', 'whistle', 'candle',
+  'entertainment center', 'lampshade',
   'plate rack', 'medicine chest', 'potter\'s wheel', 'ironing board',
-  'sewing machine', 'television', 'remote control', 'cellular telephone',
+  'sewing machine', 'television', 'remote control',
   'laptop', 'notebook computer', 'pencil box', 'pencil sharpener', 'mousepad'
 ];
 
@@ -121,7 +121,7 @@ function decodeBase64ToRgba(dataUrl: string): { width: number; height: number; d
 
     // 2. Try JPEG decoding
     try {
-      const decoded = jpeg.decode(buffer, { useTArray: true });
+      const decoded = jpeg.decode(buffer, { useTArray: true, tolerantDecoding: true });
       if (decoded && decoded.width > 0 && decoded.height > 0) {
         return { width: decoded.width, height: decoded.height, data: decoded.data, mimeType: 'image/jpeg' };
       }
@@ -302,21 +302,40 @@ Return ONLY valid JSON:
   "reason": string
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: prompt },
-            { inlineData: { data: cleanBase64, mimeType } },
-          ],
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-1.5-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              { inlineData: { data: cleanBase64, mimeType } },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
         },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-      },
-    });
+      });
+    } catch {
+      response = await ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              { inlineData: { data: cleanBase64, mimeType } },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+    }
 
     const text = response.text;
     if (!text) return null;
@@ -498,9 +517,9 @@ async function evaluateWithMobileNetCNN(
   }
 
   // 2. REJECT Domestic / Indoor Setting (e.g. single packet on bed/quilt/table/desk)
-  // When indoor/domestic surfaces are detected and no dedicated public waste receptacle is present
-  if ((domesticIndoorScore > 0.01 || detectedDomesticList.length > 0) && dedicatedWasteScore < 0.03) {
-    const nonWasteConf = Math.min(0.95, Math.max(0.82, domesticIndoorScore + 0.60));
+  // When indoor/domestic surfaces are clearly dominant and no dedicated public waste receptacle is present
+  if (domesticIndoorScore >= 0.20 && domesticIndoorScore > ambiguousItemScore && dedicatedWasteScore < 0.03) {
+    const nonWasteConf = Math.min(0.95, Math.max(0.82, domesticIndoorScore + 0.50));
     const detectedContext = detectedDomesticList[0] || 'Indoor / Furniture';
     return {
       verified: false,
@@ -509,7 +528,7 @@ async function evaluateWithMobileNetCNN(
       category: `Non-Waste (${detectedContext})`,
       quality: qualityAnalysis.quality,
       detectedWasteTypes: [],
-      reason: `No relevant waste issue detected. The object is in an indoor/domestic setting (${detectedContext}) and is not discarded waste.`,
+      reason: `No relevant waste issue detected. The object is in an indoor/domestic setting (${detectedContext}) rather than a public waste disposal issue.`,
       modelVersion: VERIFICATION_CONFIG.MODEL_VERSION,
       verifiedAt: new Date().toISOString(),
       details: {
@@ -569,13 +588,13 @@ async function evaluateWithMobileNetCNN(
   }
 
   // 5. EVALUATE Ambiguous Household Items on Outdoor Ground vs Isolated Item
-  if (ambiguousItemScore >= 0.06) {
-    // Check if image exhibits high multi-color entropy + high sharpness indicative of outdoor debris
-    const hasOutdoorDebrisContext = qualityAnalysis.colorEntropy > 65 && qualityAnalysis.sharpnessScore > 35;
+  if (ambiguousItemScore >= 0.04) {
+    // Check if image exhibits multi-color entropy + sharpness indicative of outdoor debris or litter pile
+    const hasOutdoorDebrisContext = (qualityAnalysis.colorEntropy > 35 && qualityAnalysis.sharpnessScore > 20) || ambiguousItemScore >= 0.15;
 
     if (hasOutdoorDebrisContext) {
       const wasteConfidence = Math.min(0.92, Math.max(0.65, Math.round((ambiguousItemScore * 4.0 + 0.40) * 100) / 100));
-      const finalCategory = issueTypeHint || detectedWasteList[0] || 'Plastic Waste';
+      const finalCategory = issueTypeHint || detectedWasteList[0] || 'Plastic / Litter Waste';
       return {
         verified: true,
         wasteDetected: true,
@@ -656,7 +675,7 @@ export async function verifyImageWithLevel3AI(
       wasteDetected: false,
       confidence: 0,
       category: 'Unreadable Image',
-      quality: 'POOR',
+      quality: 'FAIR',
       detectedWasteTypes: [],
       reason: 'Failed to decode image data. Please upload a standard PNG or JPEG image.',
       modelVersion: VERIFICATION_CONFIG.MODEL_VERSION,

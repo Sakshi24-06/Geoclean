@@ -55,6 +55,47 @@ export function SuccessModal({ report, onClose, onTrack }: { report: Report; onC
   );
 }
 
+function normalizeImageForVerification(file: File): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX_DIM = 1280;
+        let width = img.width;
+        let height = img.height;
+        if (width > MAX_DIM || height > MAX_DIM) {
+          if (width > height) {
+            height = Math.round((height * MAX_DIM) / width);
+            width = MAX_DIM;
+          } else {
+            width = Math.round((width * MAX_DIM) / height);
+            height = MAX_DIM;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.85));
+        } else {
+          resolve(String(reader.result));
+        }
+      };
+      img.onerror = () => {
+        resolve(String(reader.result));
+      };
+      img.src = String(reader.result);
+    };
+    reader.onerror = () => {
+      resolve('');
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function ReportModal({ onClose, onSubmitted }: { onClose: () => void; onSubmitted: (report: Report) => void }) {
   const { user } = useAuth();
   const [step, setStep] = useState(1);
@@ -123,7 +164,13 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
       case 1:
         return Boolean(issueType && issueType.trim() !== '');
       case 2:
-        return Boolean(photo && verificationStatus === 'VERIFIED');
+        return Boolean(
+          photo &&
+          verificationStatus === 'VERIFIED' &&
+          verificationResult?.verified &&
+          verificationResult?.wasteDetected &&
+          !verificationResult?.error
+        );
       case 3:
         return isLocationFormValid();
       case 4:
@@ -133,6 +180,9 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
           issueType &&
           photo &&
           verificationStatus === 'VERIFIED' &&
+          verificationResult?.verified &&
+          verificationResult?.wasteDetected &&
+          !verificationResult?.error &&
           isLocationFormValid()
         );
       default:
@@ -148,15 +198,33 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
     try {
       const result = await ImageVerificationService.verifyImage(imageSrc, 'CITIZEN_BEFORE', typeHint);
       setVerificationResult(result);
-      if (result.verified) {
+      if (result.verified && result.wasteDetected && !result.error) {
         setVerificationStatus('VERIFIED');
       } else {
         setVerificationStatus('FAILED');
-        setError(result.reason || 'Image could not be verified as a valid GeoClean issue image. Please upload a clear photo showing the waste/cleanliness issue.');
+        if (result.error) {
+          setError(result.reason || 'Verification service temporarily unavailable. Please try again.');
+        } else if (result.quality === 'POOR') {
+          setError(result.reason || 'Image quality too low. Please upload a clearer photo.');
+        } else {
+          setError(result.reason || 'No relevant waste detected in this image.');
+        }
       }
     } catch {
       setVerificationStatus('FAILED');
-      setError('Unable to complete AI image verification. Please try uploading again.');
+      setVerificationResult({
+        verified: false,
+        wasteDetected: false,
+        confidence: 0,
+        category: 'Verification Failed',
+        quality: 'GOOD',
+        detectedWasteTypes: [],
+        reason: 'Unable to connect to AI verification service. Please try again.',
+        error: true,
+        modelVersion: 'geoclean-level3-waste-v1',
+        verifiedAt: new Date().toISOString(),
+      });
+      setError('Unable to connect to AI verification service. Please try again.');
     } finally {
       setIsVerifying(false);
     }
@@ -180,10 +248,15 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
     setImageSource(source);
     setPhotoFile(file);
 
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = String(reader.result);
-      setPhoto(dataUrl);
+    try {
+      const normalizedDataUrl = await normalizeImageForVerification(file);
+      const displayDataUrl = normalizedDataUrl || (await new Promise<string>((res) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result));
+        r.readAsDataURL(file);
+      }));
+
+      setPhoto(displayDataUrl);
 
       // If Camera: automatically solicit GPS current location
       if (source === 'CAMERA') {
@@ -191,11 +264,12 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
       }
 
       // Run Level 3 AI Model Verification
-      await runVerification(dataUrl, issueType);
-    };
-
-    reader.readAsDataURL(file);
-    event.target.value = '';
+      await runVerification(displayDataUrl, issueType);
+    } catch {
+      setError('Failed to process image. Please try again.');
+    } finally {
+      event.target.value = '';
+    }
   };
 
   const handleLocationFieldChange = (field: keyof typeof locationForm, value: string) => {
@@ -742,28 +816,87 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
                     </div>
                   )}
 
-                  {verificationStatus === 'FAILED' && (
+                  {/* Case B: Analyzed by AI, but No Waste Detected */}
+                  {verificationStatus === 'FAILED' && !verificationResult?.error && verificationResult?.quality !== 'POOR' && (
                     <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-4 text-amber-900">
                       <div className="flex items-start gap-2.5">
                         <AlertCircle size={18} className="mt-0.5 flex-shrink-0 text-amber-600" />
                         <div className="flex-1">
-                          <strong className="block text-sm font-bold">✕ Image Not Verified</strong>
-                          <p className="mt-1 text-xs font-bold text-amber-900">
-                            {verificationResult?.wasteDetected === false ? 'No relevant waste detected.' : 'Image could not be verified.'}
+                          <strong className="block text-sm font-bold text-amber-900">✕ Image Not Verified</strong>
+                          <p className="mt-1 text-xs font-bold text-amber-950">
+                            No relevant waste detected.
                           </p>
                           <p className="mt-0.5 text-xs leading-relaxed text-amber-800">
-                            {verificationResult?.reason || 'Please upload a clear photo showing the reported waste/cleanliness issue.'}
+                            {verificationResult?.reason || 'The uploaded photo does not appear to contain relevant public waste or cleanliness issues. Please upload a photo showing the waste problem.'}
                           </p>
-                          {verificationResult?.quality === 'POOR' && (
-                            <p className="mt-1 text-xs font-semibold text-red-600">
-                              Image quality: POOR — Please upload a clearer, well-lit image.
-                            </p>
-                          )}
                           <div className="mt-3 flex gap-2">
                             <button
                               type="button"
                               onClick={resetPhoto}
                               className="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-amber-800"
+                            >
+                              Upload / Capture Another Image
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Case C: Genuinely Poor Image Quality */}
+                  {verificationStatus === 'FAILED' && !verificationResult?.error && verificationResult?.quality === 'POOR' && (
+                    <div className="rounded-2xl border border-red-200 bg-red-50/80 p-4 text-red-900">
+                      <div className="flex items-start gap-2.5">
+                        <AlertTriangle size={18} className="mt-0.5 flex-shrink-0 text-red-600" />
+                        <div className="flex-1">
+                          <strong className="block text-sm font-bold text-red-900">✕ Image Quality Too Low</strong>
+                          <p className="mt-1 text-xs font-bold text-red-950">
+                            Image quality: POOR — Please upload a clearer, well-lit image.
+                          </p>
+                          <p className="mt-0.5 text-xs leading-relaxed text-red-800">
+                            {verificationResult?.reason || 'The image is too blurry, too dark, or overexposed for AI verification.'}
+                          </p>
+                          <div className="mt-3 flex gap-2">
+                            <button
+                              type="button"
+                              onClick={resetPhoto}
+                              className="rounded-lg bg-red-700 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-red-800"
+                            >
+                              Upload / Capture Another Image
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Case D: AI/Backend/Server or Network Error */}
+                  {verificationStatus === 'FAILED' && (verificationResult?.error || !verificationResult) && (
+                    <div className="rounded-2xl border border-rose-200 bg-rose-50/90 p-4 text-rose-950">
+                      <div className="flex items-start gap-2.5">
+                        <AlertTriangle size={18} className="mt-0.5 flex-shrink-0 text-rose-600" />
+                        <div className="flex-1">
+                          <strong className="block text-sm font-bold text-rose-900">⚠ Image Verification Service Error</strong>
+                          <p className="mt-1 text-xs font-bold text-rose-950">
+                            Verification service returned an error.
+                          </p>
+                          <p className="mt-0.5 text-xs leading-relaxed text-rose-800">
+                            {verificationResult?.reason || 'Unable to connect to the verification engine. Your photo was not rejected for poor quality.'}
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {photo && (
+                              <button
+                                type="button"
+                                onClick={() => runVerification(photo, issueType)}
+                                className="rounded-lg bg-rose-700 px-3 py-1.5 text-xs font-bold text-white shadow hover:bg-rose-800"
+                              >
+                                <RefreshCw size={13} className="mr-1 inline" /> Retry Verification
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={resetPhoto}
+                              className="rounded-lg bg-white px-3 py-1.5 text-xs font-bold text-rose-900 border border-rose-300 hover:bg-rose-100"
                             >
                               Upload / Capture Another Image
                             </button>

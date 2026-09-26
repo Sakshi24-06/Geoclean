@@ -187,10 +187,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [loadProfile]);
 
   // Login calls signInWithPassword and hydrates profile immediately
+  // Login calls signInWithPassword, verifies profile, auto-heals if needed, and sets user
   const login = useCallback(
     async (email: string, password: string, expectedRole: Role): Promise<AuthResult> => {
-      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+      const cleanEmail = email.trim();
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password,
+      });
+
       if (signInError) {
+        console.error('[GeoClean Login Error]:', signInError.name, signInError.message);
+        if (/email not confirmed/i.test(signInError.message)) {
+          return { ok: false, error: 'Please verify your email address before logging in.' };
+        }
+        if (/rate limit|too many requests/i.test(signInError.message)) {
+          return { ok: false, error: 'Too many login attempts. Please wait a moment and try again.' };
+        }
+        if (
+          signInError.name === 'AuthRetryableFetchError' ||
+          /fetch failed|network|could not resolve host/i.test(signInError.message)
+        ) {
+          return {
+            ok: false,
+            error:
+              'Authentication service is unreachable. Please verify your internet connection or Supabase project status.',
+          };
+        }
         return { ok: false, error: 'Invalid email or password.' };
       }
 
@@ -202,21 +225,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         };
       }
 
-      const { data: profile, error: profileError } = await supabase
+      let profile: ProfileRow | null = null;
+      const { data: existingProfile, error: profileError } = await supabase
         .from('profiles')
         .select('id, full_name, email, mobile_number, role, created_at')
         .eq('id', authData.user.id)
-        .single();
+        .maybeSingle();
 
-      if (profileError || !profile) {
-        await supabase.auth.signOut();
-        return {
-          ok: false,
-          error: `Could not load your profile: ${profileError?.message || 'No profile record found.'}`,
-        };
+      if (profileError) {
+        console.warn('[GeoClean Login Profile Query]:', profileError.message);
       }
 
-      if ((profile as ProfileRow).role !== expectedRole) {
+      if (existingProfile) {
+        profile = existingProfile as ProfileRow;
+      } else {
+        // Auto-heal missing profile row using metadata from Supabase Auth
+        const meta = authData.user.user_metadata || {};
+        const metaRole = (meta.role as Role) || expectedRole || 'user';
+        const metaName = (meta.full_name as string) || authData.user.email?.split('@')[0] || 'User';
+        const metaMobile = (meta.mobile_number as string) || null;
+
+        const { data: healedProfile, error: healError } = await supabase
+          .from('profiles')
+          .upsert(
+            {
+              id: authData.user.id,
+              full_name: metaName,
+              email: authData.user.email || cleanEmail,
+              mobile_number: metaMobile,
+              role: metaRole,
+            },
+            { onConflict: 'id' }
+          )
+          .select('id, full_name, email, mobile_number, role, created_at')
+          .maybeSingle();
+
+        if (healError || !healedProfile) {
+          console.error('[GeoClean Profile Auto-Heal Failed]:', healError);
+          await supabase.auth.signOut();
+          return {
+            ok: false,
+            error: 'Unable to load or create your user profile. Please try again.',
+          };
+        }
+        profile = healedProfile as ProfileRow;
+      }
+
+      if (profile.role !== expectedRole) {
         await supabase.auth.signOut();
         return {
           ok: false,
@@ -227,21 +282,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         };
       }
 
-      const { data: ngo, error: ngoError } = await supabase
-        .from('ngos')
-        .select('ngo_name, address, description, website, services')
-        .eq('profile_id', authData.user.id)
-        .single();
+      let ngo: any = null;
+      if (expectedRole === 'ngo') {
+        const { data: existingNgo, error: ngoError } = await supabase
+          .from('ngos')
+          .select('ngo_name, address, description, website, services')
+          .eq('profile_id', authData.user.id)
+          .maybeSingle();
 
-      if (expectedRole === 'ngo' && (ngoError || !ngo)) {
-        await supabase.auth.signOut();
-        return {
-          ok: false,
-          error: `Could not load your NGO organization record: ${ngoError?.message || 'No NGO record found.'}`,
-        };
+        if (existingNgo) {
+          ngo = existingNgo;
+        } else {
+          // Auto-heal missing NGO row
+          const meta = authData.user.user_metadata || {};
+          const ngoName = (meta.ngo_name as string) || (meta.full_name as string) || 'NGO Partner';
+          const address = (meta.address as string) || 'Pune, Maharashtra';
+          const { data: healedNgo, error: healNgoError } = await supabase
+            .from('ngos')
+            .upsert(
+              {
+                profile_id: authData.user.id,
+                ngo_name: ngoName,
+                address,
+                latitude: meta.latitude ? Number(meta.latitude) : null,
+                longitude: meta.longitude ? Number(meta.longitude) : null,
+                mobile_number: (meta.mobile_number as string) || profile.mobile_number || null,
+                description: 'Authorized GeoClean cleanup partner in Pune.',
+                services: 'Waste Management, Community Cleanup',
+              },
+              { onConflict: 'profile_id' }
+            )
+            .select('ngo_name, address, description, website, services')
+            .maybeSingle();
+
+          if (healNgoError || !healedNgo) {
+            console.error('[GeoClean NGO Auto-Heal Failed]:', healNgoError);
+            await supabase.auth.signOut();
+            return {
+              ok: false,
+              error: 'Could not load your NGO organization record: No NGO record found.',
+            };
+          }
+          ngo = healedNgo;
+        }
       }
 
-      setUser(asUser({ ...(profile as ProfileRow), ngos: ngo ? [ngo] : [] }, authData.user.user_metadata));
+      setUser(asUser({ ...profile, ngos: ngo ? [ngo] : [] }, authData.user.user_metadata));
       setLoading(false);
       return { ok: true };
     },
@@ -275,18 +361,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
 
         if (error) {
-          const duplicate =
-            error.code === '23505' || /already registered|duplicate key|users_email_partial_key/i.test(error.message);
-          const limited = /rate limit|too many requests/i.test(error.message);
+          console.error('[GeoClean Signup Error]:', error.name, error.message, error.status);
+          const msg = error.message || '';
+          const isDuplicate =
+            error.code === '23505' ||
+            error.status === 422 ||
+            /already registered|duplicate key|users_email_partial_key|already exists/i.test(msg);
+          const isLimited = /rate limit|too many requests/i.test(msg) || error.status === 429;
+          const isNetworkError =
+            error.name === 'AuthRetryableFetchError' ||
+            /fetch failed|network|failed to fetch|timeout|could not resolve host|abort/i.test(msg);
+          const isConfigError = /signup.*disabled|signups not allowed|instance.*not allowed/i.test(msg);
+          const isDatabaseTriggerError = /database error|error saving new user/i.test(msg);
+          const isInvalidEmail = /invalid email|valid email|email address.*invalid/i.test(msg);
+
           return {
             ok: false,
-            error: duplicate
+            error: isDuplicate
               ? 'An account with this email already exists. Please log in instead.'
-              : limited
+              : isLimited
               ? 'Too many authentication requests. Please wait a moment and try again.'
-              : error.message.includes('Password')
-              ? error.message
-              : 'Unable to complete registration right now. Please try again later.',
+              : isNetworkError
+              ? 'Authentication service is currently unreachable. If your database project was recently paused, please verify it is active in the Supabase Dashboard.'
+              : isConfigError
+              ? 'Registration is temporarily unavailable.'
+              : isDatabaseTriggerError
+              ? 'Unable to create your profile. Please try again.'
+              : isInvalidEmail
+              ? 'Please enter a valid email address.'
+              : msg.toLowerCase().includes('password')
+              ? msg
+              : 'Unable to complete registration right now. Please try again.',
+          };
+        }
+
+        // When email confirmation is enabled, Supabase returns a user with empty identities for duplicates
+        if (signUpData?.user && signUpData.user.identities && signUpData.user.identities.length === 0) {
+          return {
+            ok: false,
+            error: 'An account with this email already exists. Please log in instead.',
           };
         }
 
@@ -298,56 +411,73 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             email: cleanEmail,
             password: data.password,
           });
-          if (!signInError && signInData.user) {
+
+          if (signInError) {
+            console.warn('[GeoClean Signup Post-SignIn Notice]:', signInError.message);
+            if (/email not confirmed/i.test(signInError.message)) {
+              return {
+                ok: false,
+                error: 'Account created! Please check your email to confirm your account before logging in.',
+              };
+            }
+          } else if (signInData.user) {
             signedInUser = signInData.user;
           }
         }
 
         if (signedInUser) {
           // 1. Upsert profiles row
-          try {
-            await supabase.from('profiles').upsert(
-              {
-                id: signedInUser.id,
-                full_name: fullName || signedInUser.email || 'Citizen',
-                email: signedInUser.email || cleanEmail,
-                mobile_number: mobileNumber,
-                role,
-              },
-              { onConflict: 'id' }
-            );
-          } catch (profErr) {
-            console.warn('Profile sync note:', profErr);
+          const { error: profError } = await supabase.from('profiles').upsert(
+            {
+              id: signedInUser.id,
+              full_name: fullName || signedInUser.email || 'Citizen',
+              email: signedInUser.email || cleanEmail,
+              mobile_number: mobileNumber,
+              role,
+            },
+            { onConflict: 'id' }
+          );
+
+          if (profError) {
+            console.error('[GeoClean Profile Insert Error]:', profError.message || profError);
+            return {
+              ok: false,
+              error: 'Unable to create your profile. Please try again.',
+            };
           }
 
           // 2. If NGO role, populate public.ngos row
           if (role === 'ngo') {
-            try {
-              const ngoName = data.organization || data.name || 'NGO Partner';
-              const address = data.location || 'Pune, Maharashtra';
-              const description = data.description || 'Authorized GeoClean cleanup partner in Pune.';
-              const website = data.website || null;
-              const services = data.services || 'Waste Management, Community Cleanup';
+            const ngoName = data.organization || data.name || 'NGO Partner';
+            const address = data.location || 'Pune, Maharashtra';
+            const description = data.description || 'Authorized GeoClean cleanup partner in Pune.';
+            const website = data.website || null;
+            const services = data.services || 'Waste Management, Community Cleanup';
 
-              await supabase.from('ngos').upsert(
-                {
-                  profile_id: signedInUser.id,
-                  ngo_name: ngoName,
-                  address,
-                  latitude: data.latitude ?? null,
-                  longitude: data.longitude ?? null,
-                  mobile_number: mobileNumber,
-                  description,
-                  website,
-                  services,
-                },
-                { onConflict: 'profile_id' }
-              );
+            const { error: ngoErr } = await supabase.from('ngos').upsert(
+              {
+                profile_id: signedInUser.id,
+                ngo_name: ngoName,
+                address,
+                latitude: data.latitude ?? null,
+                longitude: data.longitude ?? null,
+                mobile_number: mobileNumber,
+                description,
+                website,
+                services,
+              },
+              { onConflict: 'profile_id' }
+            );
 
-              window.dispatchEvent(new CustomEvent('geoclean-ngos-updated'));
-            } catch (ngoErr) {
-              console.warn('NGO registration database sync note:', ngoErr);
+            if (ngoErr) {
+              console.error('[GeoClean NGO Insert Error]:', ngoErr.message || ngoErr);
+              return {
+                ok: false,
+                error: 'Unable to create your NGO profile record. Please try again.',
+              };
             }
+
+            window.dispatchEvent(new CustomEvent('geoclean-ngos-updated'));
           }
 
           // 3. Create welcome notification for citizen
@@ -366,7 +496,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         return { ok: true };
       } catch (err) {
-        console.error('Signup error:', err);
+        console.error('[GeoClean Signup Unexpected Error]:', err);
         return {
           ok: false,
           error: err instanceof Error ? err.message : 'An error occurred during registration.',
