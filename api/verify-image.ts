@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { verifyImageWithLevel3AI } from '../src/lib/ai/backendModelEngine';
+import { verifyImageWithLevel3AI } from '../src/lib/ai/backendModelEngine.js';
 
 export const config = {
   api: {
