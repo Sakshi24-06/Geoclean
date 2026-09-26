@@ -10,15 +10,22 @@ export const config = {
 };
 
 export default async function handler(req: any, res: any) {
-  res.setHeader('Content-Type', 'application/json');
-
-  if (req.method !== 'POST') {
-    res.statusCode = 405;
-    res.end(JSON.stringify({ error: 'Method not allowed' }));
-    return;
-  }
-
   try {
+    if (typeof res.setHeader === 'function') {
+      res.setHeader('Content-Type', 'application/json');
+    }
+
+    if (req.method !== 'POST') {
+      res.statusCode = 405;
+      res.end(JSON.stringify({
+        error: 'Method not allowed',
+        message: 'Only POST requests are supported on this endpoint.',
+        verified: false,
+        wasteDetected: false,
+      }));
+      return;
+    }
+
     let body = req.body;
     if (typeof body === 'string') {
       try {
@@ -34,14 +41,21 @@ export default async function handler(req: any, res: any) {
         req.on('error', reject);
       });
       const raw = Buffer.concat(chunks).toString('utf-8');
-      body = JSON.parse(raw || '{}');
+      try {
+        body = JSON.parse(raw || '{}');
+      } catch {}
     }
 
     const { image, context = 'CITIZEN_BEFORE', issueType } = body || {};
 
-    if (!image) {
+    if (!image || typeof image !== 'string') {
       res.statusCode = 400;
-      res.end(JSON.stringify({ error: 'Image data payload is required.' }));
+      res.end(JSON.stringify({
+        error: 'Image data payload is required.',
+        message: 'Image data payload is required.',
+        verified: false,
+        wasteDetected: false,
+      }));
       return;
     }
 
@@ -50,7 +64,16 @@ export default async function handler(req: any, res: any) {
     res.end(JSON.stringify(result));
   } catch (err: any) {
     console.error('[Vercel AI Verification Error]:', err?.stack || err);
+    if (typeof res.setHeader === 'function') {
+      res.setHeader('Content-Type', 'application/json');
+    }
     res.statusCode = 500;
-    res.end(JSON.stringify({ error: 'AI Verification engine error', details: String(err?.message || err) }));
+    res.end(JSON.stringify({
+      error: 'AI Verification engine error',
+      message: err?.message || 'AI verification failed',
+      details: String(err?.message || err),
+      verified: false,
+      wasteDetected: false,
+    }));
   }
 }

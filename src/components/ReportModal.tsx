@@ -24,7 +24,7 @@ import { issueOptions, type Report, type StructuredLocation } from '@/lib/types'
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/utils/supabase';
 import { getCurrentGeoLocation, lookupPostalCodeFromAddress, type GeoLocationResult } from '@/utils/geo';
-import { ImageVerificationService, type VerificationResult } from '@/lib/ai/imageVerificationService';
+import { ImageVerificationService, toSafeErrorMessage, type VerificationResult } from '@/lib/ai/imageVerificationService';
 import { createReportSubmittedNotification } from '@/lib/notificationService';
 
 function ReviewRow({ label, value }: { label: string; value: string }) {
@@ -203,14 +203,16 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
       } else {
         setVerificationStatus('FAILED');
         if (result.error) {
-          setError(result.reason || 'Verification service temporarily unavailable. Please try again.');
+          setError(toSafeErrorMessage(result.reason, 'Image verification server error. Please try again.'));
         } else if (result.quality === 'POOR') {
-          setError(result.reason || 'Image quality too low. Please upload a clearer photo.');
+          setError(toSafeErrorMessage(result.reason, 'Image quality too low. Please upload a clearer photo.'));
         } else {
-          setError(result.reason || 'No relevant waste detected in this image.');
+          setError(toSafeErrorMessage(result.reason, 'No relevant waste detected in this image.'));
         }
       }
-    } catch {
+    } catch (err: any) {
+      console.error('[ReportModal] Image verification failed with error:', err);
+      const safeReason = toSafeErrorMessage(err, 'Unable to connect to AI verification service. Please try again.');
       setVerificationStatus('FAILED');
       setVerificationResult({
         verified: false,
@@ -219,12 +221,12 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
         category: 'Verification Failed',
         quality: 'GOOD',
         detectedWasteTypes: [],
-        reason: 'Unable to connect to AI verification service. Please try again.',
+        reason: safeReason,
         error: true,
         modelVersion: 'geoclean-level3-waste-v1',
         verifiedAt: new Date().toISOString(),
       });
-      setError('Unable to connect to AI verification service. Please try again.');
+      setError(safeReason);
     } finally {
       setIsVerifying(false);
     }
@@ -504,7 +506,8 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
         .single();
 
       if (insertError || !inserted) {
-        setError(insertError?.message || 'Could not submit your report. Please try again.');
+        console.error('[ReportModal] Supabase report insert failed:', insertError);
+        setError(toSafeErrorMessage(insertError, 'Could not submit your report. Please try again.'));
         setSubmitting(false);
         return;
       }
@@ -612,7 +615,8 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
       window.dispatchEvent(new CustomEvent('geoclean-reports-updated'));
       onSubmitted(report);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unexpected error occurred while submitting.');
+      console.error('[ReportModal] Unexpected submit error:', err);
+      setError(toSafeErrorMessage(err, 'An unexpected error occurred while submitting.'));
     } finally {
       setSubmitting(false);
     }
@@ -827,7 +831,10 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
                             No relevant waste detected.
                           </p>
                           <p className="mt-0.5 text-xs leading-relaxed text-amber-800">
-                            {verificationResult?.reason || 'The uploaded photo does not appear to contain relevant public waste or cleanliness issues. Please upload a photo showing the waste problem.'}
+                            {toSafeErrorMessage(
+                              verificationResult?.reason,
+                              'The uploaded photo does not appear to contain relevant public waste or cleanliness issues. Please upload a photo showing the waste problem.'
+                            )}
                           </p>
                           <div className="mt-3 flex gap-2">
                             <button
@@ -854,7 +861,10 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
                             Image quality: POOR — Please upload a clearer, well-lit image.
                           </p>
                           <p className="mt-0.5 text-xs leading-relaxed text-red-800">
-                            {verificationResult?.reason || 'The image is too blurry, too dark, or overexposed for AI verification.'}
+                            {toSafeErrorMessage(
+                              verificationResult?.reason,
+                              'The image is too blurry, too dark, or overexposed for AI verification.'
+                            )}
                           </p>
                           <div className="mt-3 flex gap-2">
                             <button
@@ -881,7 +891,10 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
                             Verification service returned an error.
                           </p>
                           <p className="mt-0.5 text-xs leading-relaxed text-rose-800">
-                            {verificationResult?.reason || 'Unable to connect to the verification engine. Your photo was not rejected for poor quality.'}
+                            {toSafeErrorMessage(
+                              verificationResult?.reason,
+                              'Unable to connect to the verification engine. Your photo was not rejected for poor quality.'
+                            )}
                           </p>
                           <div className="mt-3 flex flex-wrap gap-2">
                             {photo && (
@@ -1341,7 +1354,11 @@ export default function ReportModal({ onClose, onSubmitted }: { onClose: () => v
           )}
 
           {/* Error Message */}
-          {error && <p className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{error}</p>}
+          {error && (
+            <p className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
+              {toSafeErrorMessage(error)}
+            </p>
+          )}
 
           {/* Modal Footer Controls */}
           <div className="mt-7 flex items-center justify-between gap-3">

@@ -20,7 +20,7 @@ import {
   uploadAfterPhoto,
   type DbReport,
 } from '@/lib/reportData';
-import { ImageVerificationService } from '@/lib/ai/imageVerificationService';
+import { ImageVerificationService, toSafeErrorMessage } from '@/lib/ai/imageVerificationService';
 
 export interface ReportDetailModalProps {
   report: DbReport;
@@ -76,8 +76,10 @@ export function ReportDetailModal({
         const verification = await ImageVerificationService.verifyNgoAfterImage(dataUrl);
         if (!verification.verified) {
           setError(
-            verification.reason ||
+            toSafeErrorMessage(
+              verification.reason,
               'After photo could not be verified by AI. Please upload a clear photo of the cleaned site.'
+            )
           );
           setVerifying(false);
           return;
@@ -89,7 +91,7 @@ export function ReportDetailModal({
         }
         await refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Photo upload failed.');
+        setError(toSafeErrorMessage(err, 'Photo upload failed.'));
       } finally {
         setVerifying(false);
       }
@@ -208,7 +210,7 @@ export function ReportDetailModal({
         )}
         {error && (
           <p className="auth-error mt-4 text-xs font-semibold text-red-700 bg-red-50 p-3 rounded-xl border border-red-200">
-            {error}
+            {toSafeErrorMessage(error)}
           </p>
         )}
 

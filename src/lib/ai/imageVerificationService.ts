@@ -24,6 +24,48 @@ export interface VerificationResult {
 }
 
 /**
+ * Converts any API, Supabase, or thrown error object safely into a string to prevent React rendering crashes.
+ *
+ * Rules:
+ * 1. If error.message exists, return String(error.message).
+ * 2. If error is a string, return trimmed string.
+ * 3. Supports nested objects like { error: { code, message } } or { code, message }.
+ * 4. Otherwise, returns a generic fallback string (e.g. "Image verification server error.").
+ */
+export function toSafeErrorMessage(err: unknown, fallback = 'Image verification server error.'): string {
+  if (err === null || err === undefined) {
+    return fallback;
+  }
+
+  if (typeof err === 'string') {
+    const trimmed = err.trim();
+    return trimmed || fallback;
+  }
+
+  if (typeof err === 'object') {
+    const obj = err as Record<string, any>;
+    if (obj.message !== undefined && obj.message !== null) {
+      if (typeof obj.message === 'object') {
+        return toSafeErrorMessage(obj.message, fallback);
+      }
+      const msg = String(obj.message).trim();
+      if (msg) return msg;
+    }
+    if (obj.error !== undefined && obj.error !== null) {
+      return toSafeErrorMessage(obj.error, fallback);
+    }
+    if (obj.details !== undefined && obj.details !== null) {
+      return toSafeErrorMessage(obj.details, fallback);
+    }
+    if (obj.reason !== undefined && obj.reason !== null) {
+      return toSafeErrorMessage(obj.reason, fallback);
+    }
+  }
+
+  return fallback;
+}
+
+/**
  * Level 3 AI Image Verification Service.
  * Acts as the client-side gateway to the backend AI verification model engine.
  * Never hardcodes or fabricates verification metrics.
@@ -98,18 +140,29 @@ export class ImageVerificationService {
           ...data,
           error: false,
           isRelevant: data.wasteDetected || context === 'NGO_AFTER',
+          reason: typeof data.reason === 'string' ? data.reason : (data.reason ? toSafeErrorMessage(data.reason) : undefined),
         };
       }
 
-      const reasonMessage =
-        parsedData.error ||
-        parsedData.details ||
-        `Image verification server returned an error (HTTP ${response.status}). Please try again.`;
+      const errorCandidate =
+        parsedData?.error !== undefined
+          ? parsedData.error
+          : parsedData?.message !== undefined
+          ? parsedData.message
+          : parsedData?.details !== undefined
+          ? parsedData.details
+          : parsedData;
+
+      const fallbackError = `Image verification server returned an error (HTTP ${response.status}). Please try again.`;
+      const safeReason = toSafeErrorMessage(errorCandidate, fallbackError);
 
       console.warn('[AI Verification Frontend] Server returned non-OK or invalid status:', {
         status: response.status,
-        reason: reasonMessage,
-        details: parsedData.details,
+        statusText: response.statusText,
+        reason: safeReason,
+        serverPayload: parsedData,
+        rawText: rawText ? rawText.slice(0, 1000) : '',
+        details: parsedData?.details,
       });
 
       return {
@@ -119,7 +172,7 @@ export class ImageVerificationService {
         category: 'Verification Server Error',
         quality: 'GOOD',
         detectedWasteTypes: [],
-        reason: reasonMessage,
+        reason: safeReason,
         error: true,
         modelVersion: 'geoclean-level3-waste-v1',
         verifiedAt: new Date().toISOString(),
@@ -131,7 +184,13 @@ export class ImageVerificationService {
         errorName: networkErr?.name,
         errorMessage: networkErr?.message,
         errorStack: networkErr?.stack,
+        rawError: networkErr,
       });
+
+      const safeReason = toSafeErrorMessage(
+        networkErr,
+        'Image verification server is temporarily unreachable. Please check your connection and try again.'
+      );
 
       return {
         verified: false,
@@ -140,7 +199,7 @@ export class ImageVerificationService {
         category: 'Service Unavailable',
         quality: 'GOOD',
         detectedWasteTypes: [],
-        reason: 'Image verification server is temporarily unreachable. Please check your connection and try again.',
+        reason: safeReason,
         error: true,
         modelVersion: 'geoclean-level3-waste-v1',
         verifiedAt: new Date().toISOString(),
