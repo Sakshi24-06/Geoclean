@@ -268,7 +268,7 @@ Return ONLY valid JSON with this exact schema:
     let response;
     try {
       response = await ai.models.generateContent({
-        model: 'gemini-1.5-flash',
+       model: 'gemini-3.8-flash',
         contents: [
           {
             role: 'user',
@@ -284,7 +284,7 @@ Return ONLY valid JSON with this exact schema:
       });
     } catch {
       response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+       model: 'gemini-3.8-flash',
         contents: [
           {
             role: 'user',
